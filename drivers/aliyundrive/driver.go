@@ -22,7 +22,6 @@ import (
 	"github.com/OpenListTeam/OpenList/internal/stream"
 	"github.com/OpenListTeam/OpenList/pkg/cron"
 	"github.com/OpenListTeam/OpenList/pkg/utils"
-	"github.com/go-resty/resty/v2"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -33,6 +32,7 @@ type AliDrive struct {
 	cron        *cron.Cron
 	DriveId     string
 	UserID      string
+	ref         *AliDrive
 }
 
 func (d *AliDrive) Config() driver.Config {
@@ -46,26 +46,28 @@ func (d *AliDrive) GetAddition() driver.Additional {
 func (d *AliDrive) Init(ctx context.Context) error {
 	// TODO login / refresh token
 	//op.MustSaveDriverStorage(d)
-	err := d.refreshToken()
-	if err != nil {
-		return err
-	}
-	// get driver id
-	res, err, _ := d.request("https://api.alipan.com/v2/user/get", http.MethodPost, nil, nil)
-	if err != nil {
-		return err
-	}
-	d.DriveId = utils.Json.Get(res, "default_drive_id").ToString()
-	d.UserID = utils.Json.Get(res, "user_id").ToString()
-	d.cron = cron.NewCron(time.Hour * 2)
-	d.cron.Do(func() {
+	if d.ref == nil {
 		err := d.refreshToken()
 		if err != nil {
-			log.Errorf("%+v", err)
+			return err
 		}
-	})
-	if global.Has(d.UserID) {
-		return nil
+		// get driver id
+		res, err, _ := d.request("https://api.alipan.com/v2/user/get", http.MethodPost, nil, nil)
+		if err != nil {
+			return err
+		}
+		d.UserID = utils.Json.Get(res, "user_id").ToString()
+		d.cron = cron.NewCron(time.Hour * 2)
+		d.cron.Do(func() {
+			err := d.refreshToken()
+			if err != nil {
+				log.Errorf("%+v", err)
+			}
+		})
+	}
+	if d.ref != nil || global.Has(d.UserID) {
+		err := d.refreshDriveId()
+		return err
 	}
 	// init deviceID
 	deviceID := utils.HashData(utils.SHA256, []byte(d.UserID))
@@ -79,7 +81,17 @@ func (d *AliDrive) Init(ctx context.Context) error {
 	global.Store(d.UserID, &state)
 	// init signature
 	d.sign()
-	return nil
+	err := d.refreshDriveId()
+	return err
+}
+
+func (d *AliDrive) InitReference(storage driver.Driver) error {
+	refStorage, ok := storage.(*AliDrive)
+	if ok {
+		d.ref = refStorage
+		return nil
+	}
+	return errs.NotSupport
 }
 
 func (d *AliDrive) Drop(ctx context.Context) error {
@@ -90,7 +102,14 @@ func (d *AliDrive) Drop(ctx context.Context) error {
 }
 
 func (d *AliDrive) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
-	files, err := d.getFiles(dir.GetID())
+	parentId := ""
+	if dir.GetID() == "root" {
+		parentId = "root"
+	} else {
+		parentId = dir.GetID()
+	}
+
+	files, err := d.getFiles(parentId)
 	if err != nil {
 		return nil, err
 	}
@@ -105,30 +124,34 @@ func (d *AliDrive) Link(ctx context.Context, file model.Obj, args model.LinkArgs
 		"file_id":    file.GetID(),
 		"expire_sec": 14400,
 	}
-	res, err, _ := d.request("https://api.alipan.com/v2/file/get_download_url", http.MethodPost, func(req *resty.Request) {
-		req.SetBody(data)
-	}, nil)
+	res, err, _ := d.requestS("https://api.alipan.com/v2/file/get_download_url", http.MethodPost, data, nil, nil)
 	if err != nil {
 		return nil, err
 	}
+	url := utils.Json.Get(res, "url").ToString()
+	if len(url) == 0 {
+		// 从 Flask后端解密 URL
+		url, _ = d.decryptURL(utils.Json.Get(res, "encrypt_url").ToString())
+	}
+	exp := time.Minute
 	return &model.Link{
 		Header: http.Header{
-			"Referer": []string{"https://www.alipan.com/"},
+			"Referer":    []string{"https://alipan.com/"},
+			"User-Agent": []string{d.Addition.UserAgent},
 		},
-		URL: utils.Json.Get(res, "url").ToString(),
+		URL:        url,
+		Expiration: &exp,
 	}, nil
 }
 
 func (d *AliDrive) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) error {
-	_, err, _ := d.request("https://api.alipan.com/adrive/v2/file/createWithFolders", http.MethodPost, func(req *resty.Request) {
-		req.SetBody(base.Json{
-			"check_name_mode": "refuse",
-			"drive_id":        d.DriveId,
-			"name":            dirName,
-			"parent_file_id":  parentDir.GetID(),
-			"type":            "folder",
-		})
-	}, nil)
+	_, err, _ := d.requestS("https://api.alipan.com/adrive/v2/file/createWithFolders", http.MethodPost, base.Json{
+		"check_name_mode": "refuse",
+		"drive_id":        d.DriveId,
+		"name":            dirName,
+		"parent_file_id":  parentDir.GetID(),
+		"type":            "folder",
+	}, nil, nil)
 	return err
 }
 
@@ -138,14 +161,12 @@ func (d *AliDrive) Move(ctx context.Context, srcObj, dstDir model.Obj) error {
 }
 
 func (d *AliDrive) Rename(ctx context.Context, srcObj model.Obj, newName string) error {
-	_, err, _ := d.request("https://api.alipan.com/v3/file/update", http.MethodPost, func(req *resty.Request) {
-		req.SetBody(base.Json{
-			"check_name_mode": "refuse",
-			"drive_id":        d.DriveId,
-			"file_id":         srcObj.GetID(),
-			"name":            newName,
-		})
-	}, nil)
+	_, err, _ := d.requestS("https://api.alipan.com/v3/file/update", http.MethodPost, base.Json{
+		"check_name_mode": "refuse",
+		"drive_id":        d.DriveId,
+		"file_id":         srcObj.GetID(),
+		"name":            newName,
+	}, nil, nil)
 	return err
 }
 
@@ -155,12 +176,10 @@ func (d *AliDrive) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
 }
 
 func (d *AliDrive) Remove(ctx context.Context, obj model.Obj) error {
-	_, err, _ := d.request("https://api.alipan.com/v2/recyclebin/trash", http.MethodPost, func(req *resty.Request) {
-		req.SetBody(base.Json{
-			"drive_id": d.DriveId,
-			"file_id":  obj.GetID(),
-		})
-	}, nil)
+	_, err, _ := d.requestS("https://api.alipan.com/v2/recyclebin/trash", http.MethodPost, base.Json{
+		"drive_id": d.DriveId,
+		"file_id":  obj.GetID(),
+	}, nil, nil)
 	return err
 }
 
@@ -193,10 +212,7 @@ func (d *AliDrive) Put(ctx context.Context, dstDir model.Obj, streamer model.Fil
 	}
 	if d.RapidUpload {
 		buf := bytes.NewBuffer(make([]byte, 0, 1024))
-		_, err := utils.CopyWithBufferN(buf, file, 1024)
-		if err != nil {
-			return err
-		}
+		utils.CopyWithBufferN(buf, file, 1024)
 		reqBody["pre_hash"] = utils.HashData(utils.SHA1, buf.Bytes())
 		if localFile != nil {
 			if _, err := localFile.Seek(0, io.SeekStart); err != nil {
@@ -218,9 +234,7 @@ func (d *AliDrive) Put(ctx context.Context, dstDir model.Obj, streamer model.Fil
 	}
 
 	var resp UploadResp
-	_, err, e := d.request("https://api.alipan.com/adrive/v2/file/createWithFolders", http.MethodPost, func(req *resty.Request) {
-		req.SetBody(reqBody)
-	}, &resp)
+	_, err, e := d.requestS("https://api.alipan.com/adrive/v2/file/createWithFolders", http.MethodPost, reqBody, nil, &resp)
 
 	if err != nil && e.Code != "PreHashMatched" {
 		return err
@@ -263,7 +277,7 @@ func (d *AliDrive) Put(ctx context.Context, dstDir model.Obj, streamer model.Fil
 			(t.file.slice(o.toNumber(), Math.min(o.plus(8).toNumber(), t.file.size)))
 		*/
 		buf := make([]byte, 8)
-		r, _ := new(big.Int).SetString(utils.GetMD5EncodeStr(d.AccessToken)[:16], 16)
+		r, _ := new(big.Int).SetString(utils.GetMD5EncodeStr(d.getAccessToken())[:16], 16)
 		i := new(big.Int).SetInt64(file.GetSize())
 		o := new(big.Int).SetInt64(0)
 		if file.GetSize() > 0 {
@@ -272,9 +286,7 @@ func (d *AliDrive) Put(ctx context.Context, dstDir model.Obj, streamer model.Fil
 		n, _ := io.NewSectionReader(localFile, o.Int64(), 8).Read(buf[:8])
 		reqBody["proof_code"] = base64.StdEncoding.EncodeToString(buf[:n])
 
-		_, err, e := d.request("https://api.alipan.com/adrive/v2/file/createWithFolders", http.MethodPost, func(req *resty.Request) {
-			req.SetBody(reqBody)
-		}, &resp)
+		_, err, e := d.requestS("https://api.alipan.com/adrive/v2/file/createWithFolders", http.MethodPost, reqBody, nil, &resp)
 		if err != nil && e.Code != "PreHashMatched" {
 			return err
 		}
@@ -288,7 +300,6 @@ func (d *AliDrive) Put(ctx context.Context, dstDir model.Obj, streamer model.Fil
 		file.Reader = localFile
 	}
 
-	rateLimited := driver.NewLimitedUploadStream(ctx, file)
 	for i, partInfo := range resp.PartInfoList {
 		if utils.IsCanceled(ctx) {
 			return ctx.Err()
@@ -297,7 +308,7 @@ func (d *AliDrive) Put(ctx context.Context, dstDir model.Obj, streamer model.Fil
 		if d.InternalUpload {
 			url = partInfo.InternalUploadUrl
 		}
-		req, err := http.NewRequest("PUT", url, io.LimitReader(rateLimited, DEFAULT))
+		req, err := http.NewRequest("PUT", url, io.LimitReader(file, DEFAULT))
 		if err != nil {
 			return err
 		}
@@ -306,19 +317,17 @@ func (d *AliDrive) Put(ctx context.Context, dstDir model.Obj, streamer model.Fil
 		if err != nil {
 			return err
 		}
-		_ = res.Body.Close()
+		res.Body.Close()
 		if count > 0 {
 			up(float64(i) * 100 / float64(count))
 		}
 	}
 	var resp2 base.Json
-	_, err, e = d.request("https://api.alipan.com/v2/file/complete", http.MethodPost, func(req *resty.Request) {
-		req.SetBody(base.Json{
-			"drive_id":  d.DriveId,
-			"file_id":   resp.FileId,
-			"upload_id": resp.UploadId,
-		})
-	}, &resp2)
+	_, err, e = d.requestS("https://api.alipan.com/v2/file/complete", http.MethodPost, base.Json{
+		"drive_id":  d.DriveId,
+		"file_id":   resp.FileId,
+		"upload_id": resp.UploadId,
+	}, nil, &resp2)
 	if err != nil && e.Code != "PreHashMatched" {
 		return err
 	}
@@ -338,17 +347,18 @@ func (d *AliDrive) Other(ctx context.Context, args model.OtherArgs) (interface{}
 	switch args.Method {
 	case "doc_preview":
 		url = "https://api.alipan.com/v2/file/get_office_preview_url"
-		data["access_token"] = d.AccessToken
+		data["access_token"] = d.getAccessToken()
 	case "video_preview":
 		url = "https://api.alipan.com/v2/file/get_video_preview_play_info"
 		data["category"] = "live_transcoding"
 		data["url_expire_sec"] = 14400
+		data["get_subtitle_info"] = true
+		data["mode"] = "high_res"
+		data["template_id"] = ""
 	default:
 		return nil, errs.NotSupport
 	}
-	_, err, _ := d.request(url, http.MethodPost, func(req *resty.Request) {
-		req.SetBody(data)
-	}, &resp)
+	_, err, _ := d.requestS(url, http.MethodPost, data, nil, &resp)
 	if err != nil {
 		return nil, err
 	}
