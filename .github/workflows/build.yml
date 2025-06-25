@@ -1,8 +1,8 @@
 name: Test Build
 
 on:
-  pull_request:
-    branches: ["main"]
+  push:
+    branches: ["me"]
   workflow_dispatch:
 
 concurrency:
@@ -33,7 +33,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: stable
 
       - name: Setup web
         run: bash build.sh dev web
@@ -52,9 +52,15 @@ jobs:
             github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$git_commit
             github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$tag
             github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=dev
+          output: openlist-$target$ext
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Compress
+        run: |
+          bash build.sh zip .md5
+
+      - name: Upload assets
+        uses: softprops/action-gh-release@v2
         with:
-          name: openlist_${{ env.SHA }}_${{ matrix.target }}
-          path: build/*
+          files: build/compress/*
+          prerelease: true
+          tag_name: beta
