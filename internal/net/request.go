@@ -158,17 +158,13 @@ func (d *downloader) download() (io.ReadCloser, error) {
 	}
 	d.ctx, d.cancel = context.WithCancelCause(d.ctx)
 
-	maxPart := int(d.params.Range.Length / int64(d.cfg.PartSize))
-	if d.params.Range.Length%int64(d.cfg.PartSize) > 0 {
-		maxPart++
+	maxPart := 1
+	if d.params.Range.Length > int64(d.cfg.PartSize) {
+		maxPart = int((d.params.Range.Length + int64(d.cfg.PartSize) - 1) / int64(d.cfg.PartSize))
 	}
 	if maxPart < d.cfg.Concurrency {
 		d.cfg.Concurrency = maxPart
 	}
-	if d.params.Range.Length == 0 {
-		d.cfg.Concurrency = 1
-	}
-
 	log.Debugf("cfgConcurrency:%d", d.cfg.Concurrency)
 
 	if d.cfg.Concurrency == 1 {

@@ -76,11 +76,12 @@ func (d *Pan123) newUpload(ctx context.Context, upReq *UploadResp, file model.Fi
 	// fetch s3 pre signed urls
 	size := file.GetSize()
 	chunkSize := min(size, 16*utils.MB)
-	chunkCount := int(size / chunkSize)
+	chunkCount := 1
+	if size > chunkSize {
+		chunkCount = int((size + chunkSize - 1) / chunkSize)
+	}
 	lastChunkSize := size % chunkSize
-	if lastChunkSize > 0 {
-		chunkCount++
-	} else {
+	if lastChunkSize == 0 {
 		lastChunkSize = chunkSize
 	}
 	// only 1 batch is allowed
