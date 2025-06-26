@@ -531,12 +531,10 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 		}
 
 		size := stream.GetSize()
-		var partSize = d.getPartSize(size)
-		part := size / partSize
-		if size%partSize > 0 {
-			part++
-		} else if part == 0 {
-			part = 1
+		partSize := d.getPartSize(size)
+		part := int64(1)
+		if size > partSize {
+			part = (size + partSize - 1) / partSize
 		}
 		partInfos := make([]PartInfo, 0, part)
 		for i := int64(0); i < part; i++ {
@@ -788,12 +786,10 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 		size := stream.GetSize()
 		// Progress
 		p := driver.NewProgress(size, up)
-		var partSize = d.getPartSize(size)
-		part := size / partSize
-		if size%partSize > 0 {
-			part++
-		} else if part == 0 {
-			part = 1
+		partSize := d.getPartSize(size)
+		part := int64(1)
+		if size > partSize {
+			part = (size + partSize - 1) / partSize
 		}
 		rateLimited := driver.NewLimitedUploadStream(ctx, stream)
 		for i := int64(0); i < part; i++ {
