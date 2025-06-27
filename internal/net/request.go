@@ -615,6 +615,9 @@ type Buf struct {
 	ctx    context.Context
 	off    int
 	rw     sync.Mutex
+
+	dataAvailable chan struct{}
+	waitRead      bool
 }
 
 // NewBuf is a buffer that can have 1 read & 1 write at the same time.
@@ -624,9 +627,16 @@ func NewBuf(ctx context.Context, maxSize int) *Buf {
 		ctx:    ctx,
 		buffer: bytes.NewBuffer(make([]byte, 0, maxSize)),
 		size:   maxSize,
+
+		dataAvailable: make(chan struct{}, 1),
 	}
 }
 func (br *Buf) Reset(size int) {
+	br.rw.Lock()
+	defer br.rw.Unlock()
+	if br.buffer == nil {
+		return
+	}
 	br.buffer.Reset()
 	br.size = size
 	br.off = 0
@@ -642,27 +652,34 @@ func (br *Buf) Read(p []byte) (n int, err error) {
 	if br.off >= br.size {
 		return 0, io.EOF
 	}
-	br.rw.Lock()
-	n, err = br.buffer.Read(p)
-	br.rw.Unlock()
-	if err == nil {
-		br.off += n
-		return n, err
-	}
-	if err != io.EOF {
-		return n, err
-	}
-	if n != 0 {
-		br.off += n
-		return n, nil
-	}
-	// n==0, err==io.EOF
-	// wait for new write for 200ms
-	select {
-	case <-br.ctx.Done():
-		return 0, br.ctx.Err()
-	case <-time.After(time.Millisecond * 200):
-		return 0, nil
+	for {
+		br.rw.Lock()
+		if br.buffer != nil {
+			n, err = br.buffer.Read(p)
+		} else {
+			err = io.ErrClosedPipe
+		}
+		br.rw.Unlock()
+		if err != nil && err != io.EOF {
+			return
+		}
+		if n > 0 {
+			br.off += n
+			return n, nil
+		}
+		br.rw.Lock()
+		br.waitRead = true
+		br.rw.Unlock()
+		// n==0, err==io.EOF
+		select {
+		case <-br.ctx.Done():
+			return 0, br.ctx.Err()
+		case _, ok := <-br.dataAvailable:
+			if !ok {
+				return 0, io.ErrClosedPipe
+			}
+			continue
+		}
 	}
 }
 
@@ -672,10 +689,23 @@ func (br *Buf) Write(p []byte) (n int, err error) {
 	}
 	br.rw.Lock()
 	defer br.rw.Unlock()
+	if br.buffer == nil {
+		return 0, io.EOF
+	}
 	n, err = br.buffer.Write(p)
+	if br.waitRead {
+		br.waitRead = false
+		select {
+		case br.dataAvailable <- struct{}{}:
+		default:
+		}
+	}
 	return
 }
 
 func (br *Buf) Close() {
+	br.rw.Lock()
+	defer br.rw.Unlock()
 	br.buffer = nil
+	close(br.dataAvailable)
 }
