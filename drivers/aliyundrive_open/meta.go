@@ -24,12 +24,6 @@ type Addition struct {
 
 var config = driver.Config{
 	Name:              "AliyundriveOpen",
-	LocalSort:         false,
-	OnlyLocal:         false,
-	OnlyProxy:         false,
-	NoCache:           false,
-	NoUpload:          false,
-	NeedMs:            false,
 	DefaultRoot:       "root",
 	NoOverwriteUpload: true,
 }

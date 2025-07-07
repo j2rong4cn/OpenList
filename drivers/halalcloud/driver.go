@@ -253,8 +253,8 @@ func (d *HalalCloud) getLink(ctx context.Context, file model.Obj, args model.Lin
 	chunks := getChunkSizes(result.Sizes)
 	resultRangeReader := func(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
 		length := httpRange.Length
-		if httpRange.Length >= 0 && httpRange.Start+httpRange.Length >= size {
-			length = -1
+		if httpRange.Length < 0 || httpRange.Start+httpRange.Length >= size {
+			length = size - httpRange.Start
 		}
 		oo := &openObject{
 			ctx:     ctx,

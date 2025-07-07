@@ -353,7 +353,7 @@ func (t *MoveTask) copyFile(srcStorage, dstStorage driver.Driver, srcFilePath, d
 		return errors.WithMessagef(err, "failed get [%s] link", srcFilePath)
 	}
 
-	fs := stream.FileStream{
+	fs := &stream.FileStream{
 		Obj: srcFile,
 		Ctx: t.Ctx(),
 	}

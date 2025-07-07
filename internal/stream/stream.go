@@ -108,8 +108,7 @@ func (f *FileStream) GetFile() model.File {
 // RangeRead have to cache all data first since only Reader is provided.
 // also support a peeking RangeRead at very start, but won't buffer more than conf.MaxBufferLimit data in memory
 func (f *FileStream) RangeRead(httpRange http_range.Range) (io.Reader, error) {
-	if httpRange.Length == -1 {
-		// 参考 internal/net/request.go
+	if httpRange.Length < 0 || httpRange.Start+httpRange.Length > f.GetSize() {
 		httpRange.Length = f.GetSize() - httpRange.Start
 	}
 	var cache io.ReaderAt = f.GetFile()
@@ -157,47 +156,45 @@ var _ model.FileStreamer = (*FileStream)(nil)
 // additional resources that need to be closed, they should be added to the Closer property of
 // the SeekableStream object and be closed together when the SeekableStream object is closed.
 type SeekableStream struct {
-	FileStream
+	*FileStream
 	// should have one of belows to support rangeRead
 	rangeReadCloser model.RangeReadCloserIF
 }
 
-func NewSeekableStream(fs FileStream, link *model.Link) (*SeekableStream, error) {
+func NewSeekableStream(fs *FileStream, link *model.Link) (*SeekableStream, error) {
 	if len(fs.Mimetype) == 0 {
 		fs.Mimetype = utils.GetMimeType(fs.Obj.GetName())
 	}
-	ss := &SeekableStream{FileStream: fs}
-	if ss.Reader != nil {
-		ss.TryAdd(ss.Reader)
-		return ss, nil
+
+	if fs.Reader != nil {
+		fs.AddIfCloser(fs.Reader)
+		return &SeekableStream{FileStream: fs}, nil
 	}
 	if link != nil {
 		if link.MFile != nil {
-			ss.Closers.TryAdd(link.MFile)
-			ss.Reader = link.MFile
-			return ss, nil
+			fs.AddIfCloser(link.MFile)
+			fs.Reader = link.MFile
 		}
+
 		if link.RangeReadCloser != nil {
-			ss.rangeReadCloser = &RateLimitRangeReadCloser{
+			link.RangeReadCloser.AcquireReference()
+			fs.Add(link.RangeReadCloser)
+			return &SeekableStream{FileStream: fs, rangeReadCloser: &RateLimitRangeReadCloser{
 				RangeReadCloserIF: link.RangeReadCloser,
 				Limiter:           ServerDownloadLimit,
-			}
-			ss.Add(ss.rangeReadCloser)
-			return ss, nil
+			}}, nil
 		}
-		if len(link.URL) > 0 {
-			rrc, err := GetRangeReadCloserFromLink(ss.GetSize(), link)
-			if err != nil {
-				return nil, err
-			}
-			rrc = &RateLimitRangeReadCloser{
-				RangeReadCloserIF: rrc,
-				Limiter:           ServerDownloadLimit,
-			}
-			ss.rangeReadCloser = rrc
-			ss.Add(rrc)
-			return ss, nil
+
+		rrf, err := GetRangeReaderFuncFromLink(fs.GetSize(), link)
+		if err != nil {
+			return nil, err
 		}
+		rrc := &model.RangeReadCloser{RangeReader: rrf}
+		fs.Add(rrc)
+		return &SeekableStream{FileStream: fs, rangeReadCloser: &RateLimitRangeReadCloser{
+			RangeReadCloserIF: rrc,
+			Limiter:           ServerDownloadLimit,
+		}}, nil
 	}
 	return nil, fmt.Errorf("illegal seekableStream")
 }
@@ -209,9 +206,6 @@ func NewSeekableStream(fs FileStream, link *model.Link) (*SeekableStream, error)
 // RangeRead is not thread-safe, pls use it in single thread only.
 func (ss *SeekableStream) RangeRead(httpRange http_range.Range) (io.Reader, error) {
 	if ss.tmpFile == nil && ss.rangeReadCloser != nil {
-		if httpRange.Length == -1 {
-			httpRange.Length = ss.GetSize() - httpRange.Start
-		}
 		rc, err := ss.rangeReadCloser.RangeRead(ss.Ctx, httpRange)
 		if err != nil {
 			return nil, err

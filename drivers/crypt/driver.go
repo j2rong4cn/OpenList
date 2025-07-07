@@ -1,12 +1,14 @@
 package crypt
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	stdpath "path"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
@@ -241,6 +243,8 @@ func (d *Crypt) Get(ctx context.Context, path string) (model.Obj, error) {
 	//return nil, errs.ObjectNotFound
 }
 
+const fileHeaderSize = 32
+
 func (d *Crypt) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
 	dstDirActualPath, err := d.getActualPathForRemote(file.GetPath(), false)
 	if err != nil {
@@ -255,43 +259,57 @@ func (d *Crypt) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 		return nil, fmt.Errorf("the remote storage driver need to be enhanced to support encrytion")
 	}
 	resultRangeReadCloser := &model.RangeReadCloser{}
-	resultRangeReadCloser.TryAdd(remoteLink.MFile)
-	if remoteLink.RangeReadCloser != nil {
-		resultRangeReadCloser.AddClosers(remoteLink.RangeReadCloser.GetClosers())
-	}
+	resultRangeReadCloser.AddIfCloser(remoteLink.MFile)
+	resultRangeReadCloser.AddIfCloser(remoteLink.RangeReadCloser)
 	remoteFileSize := remoteFile.GetSize()
-	rangeReaderFunc := func(ctx context.Context, underlyingOffset, underlyingLength int64) (io.ReadCloser, error) {
-		length := underlyingLength
-		if underlyingLength >= 0 && underlyingOffset+underlyingLength >= remoteFileSize {
-			length = -1
-		}
-		if remoteLink.MFile != nil {
-			_, err := remoteLink.MFile.Seek(underlyingOffset, io.SeekStart)
-			if err != nil {
-				return nil, err
+	mu := &sync.Mutex{}
+	var fileHeader []byte
+	rangeReaderFunc := func(ctx context.Context, offset, length int64) (io.ReadCloser, error) {
+		underlyingLength := length
+		isReadFileHeader := offset == 0 && length <= fileHeaderSize
+		if isReadFileHeader {
+			mu.Lock()
+			defer mu.Unlock()
+			if fileHeader != nil {
+				return io.NopCloser(bytes.NewReader(fileHeader[:length])), nil
 			}
-			//keep reuse same MFile and close at last.
-			return io.NopCloser(remoteLink.MFile), nil
+			length = fileHeaderSize
 		}
-		rrc := remoteLink.RangeReadCloser
-		if rrc == nil && len(remoteLink.URL) > 0 {
-			var err error
-			rrc, err = stream.GetRangeReadCloserFromLink(remoteFileSize, remoteLink)
-			if err != nil {
-				return nil, err
-			}
-			resultRangeReadCloser.AddClosers(rrc.GetClosers())
-			remoteLink.RangeReadCloser = rrc
-		}
-		if rrc != nil {
-			remoteReader, err := rrc.RangeRead(ctx, http_range.Range{Start: underlyingOffset, Length: length})
-			if err != nil {
-				return nil, err
-			}
-			return remoteReader, nil
-		}
-		return nil, errs.NotSupport
 
+		var (
+			remoteReader io.ReadCloser
+			err          error
+		)
+		if remoteLink.MFile != nil {
+			if length < 0 || offset+length > remoteFileSize {
+				length = remoteFileSize - offset
+			}
+			remoteReader = io.NopCloser(io.NewSectionReader(remoteLink.MFile, offset, length))
+		} else {
+			if remoteLink.RangeReadCloser != nil {
+				remoteReader, err = remoteLink.RangeReadCloser.RangeRead(
+					context.WithValue(ctx, utils.ClosersNoAddKey{}, true),
+					http_range.Range{Start: offset, Length: length},
+				)
+			} else {
+				var rrf model.RangeReaderFunc
+				rrf, err = stream.GetRangeReaderFuncFromLink(remoteFileSize, remoteLink)
+				if err == nil {
+					remoteReader, err = rrf(ctx, http_range.Range{Start: offset, Length: length})
+				}
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		if isReadFileHeader {
+			fileHeader = make([]byte, fileHeaderSize)
+			io.ReadFull(remoteReader, fileHeader)
+			remoteReader.Close()
+			return io.NopCloser(bytes.NewReader(fileHeader[:underlyingLength])), nil
+		}
+		return remoteReader, nil
 	}
 	resultRangeReadCloser.RangeReader = func(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
 		readSeeker, err := d.cipher.DecryptDataSeek(ctx, rangeReaderFunc, httpRange.Start, httpRange.Length)

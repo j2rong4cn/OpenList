@@ -110,13 +110,18 @@ func (d *Alias) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 	if !ok {
 		return nil, errs.ObjectNotFound
 	}
+	redirect := args.Redirect
+	if strings.HasSuffix(strings.ToLower(root), ".proxy") {
+		args.Redirect = true
+	}
 	for _, dst := range dsts {
 		link, err := d.link(ctx, dst, sub, args)
 		if err == nil {
 			link.Expiration = nil // 去除非必要缓存，d.link里op.Lin有缓存
-			if !args.Redirect && len(link.URL) > 0 {
+			if !redirect && len(link.URL) > 0 {
 				// 正常情况下 多并发 仅支持返回URL的驱动
-				// alias套娃alias 可以让crypt、mega等驱动(不返回URL的) 支持并发
+				// alias套娃alias 或者 目录以`.proxy`结尾 例如 mega.proxy:/mega
+				// 可以让crypt、mega等驱动(不返回URL的) 支持并发
 				if d.DownloadConcurrency > 0 {
 					link.Concurrency = d.DownloadConcurrency
 				}
@@ -338,14 +343,6 @@ func (d *Alias) Extract(ctx context.Context, obj model.Obj, args model.ArchiveIn
 	for _, dst := range dsts {
 		link, err := d.extract(ctx, dst, sub, args)
 		if err == nil {
-			if !args.Redirect && len(link.URL) > 0 {
-				if d.DownloadConcurrency > 0 {
-					link.Concurrency = d.DownloadConcurrency
-				}
-				if d.DownloadPartSize > 0 {
-					link.PartSize = d.DownloadPartSize * utils.KB
-				}
-			}
 			return link, nil
 		}
 	}

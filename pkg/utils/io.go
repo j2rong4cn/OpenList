@@ -153,46 +153,69 @@ func Retry(attempts int, sleep time.Duration, f func() error) (err error) {
 type ClosersIF interface {
 	io.Closer
 	Add(closer io.Closer)
-	TryAdd(reader io.Reader)
-	AddClosers(closers Closers)
-	GetClosers() Closers
+	AddIfCloser(a any)
+	AcquireReference()
 }
-
+type ClosersNoAddKey struct{}
 type Closers struct {
 	closers []io.Closer
-}
-
-func (c *Closers) GetClosers() Closers {
-	return *c
+	mu      sync.Mutex
+	ref     int
 }
 
 var _ ClosersIF = (*Closers)(nil)
 
+func (c *Closers) AcquireReference() {
+	c.mu.Lock()
+	// log.Debugf("Closers.AcquireReference %p,ref=%d", c, c.ref)
+	c.ref++
+	for _, closer := range c.closers {
+		if c2, ok := closer.(ClosersIF); ok {
+			c2.AcquireReference()
+		}
+	}
+	c.mu.Unlock()
+}
 func (c *Closers) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// log.Debugf("Closers.Close %p,ref=%d", c, c.ref)
+	c.ref--
+	close := c.ref <= 0
 	var errs []error
 	for _, closer := range c.closers {
-		if closer != nil {
+		if c2, ok := closer.(ClosersIF); ok {
+			errs = append(errs, c2.Close())
+		} else if closer != nil && close {
 			errs = append(errs, closer.Close())
 		}
 	}
+
+	if close {
+		c.ref = 0
+		c.closers = c.closers[:0]
+		return errors.Join(errs...)
+	}
+
 	return errors.Join(errs...)
 }
 func (c *Closers) Add(closer io.Closer) {
 	if closer != nil {
+		c.mu.Lock()
 		c.closers = append(c.closers, closer)
+		c.mu.Unlock()
 	}
 }
-func (c *Closers) AddClosers(closers Closers) {
-	c.closers = append(c.closers, closers.closers...)
-}
-func (c *Closers) TryAdd(reader io.Reader) {
-	if closer, ok := reader.(io.Closer); ok {
+func (c *Closers) AddIfCloser(a any) {
+	if closer, ok := a.(io.Closer); ok {
+		c.mu.Lock()
 		c.closers = append(c.closers, closer)
+		c.mu.Unlock()
 	}
 }
 
 func NewClosers(c ...io.Closer) Closers {
-	return Closers{c}
+	return Closers{closers: c}
 }
 
 type Ordered interface {

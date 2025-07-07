@@ -193,26 +193,22 @@ func (b *s3Backend) GetObject(ctx context.Context, bucketName, objectName string
 			rdr = io.NopCloser(link.MFile)
 		}
 	} else {
-		remoteFileSize := file.GetSize()
-		if length >= 0 && start+length >= remoteFileSize {
-			length = -1
-		}
-		rrc := link.RangeReadCloser
-		if len(link.URL) > 0 {
-			var converted, err = stream.GetRangeReadCloserFromLink(remoteFileSize, link)
+		if link.RangeReadCloser != nil {
+			link.RangeReadCloser.AcquireReference()
+			remoteReader, err := link.RangeReadCloser.RangeRead(ctx, http_range.Range{Start: start, Length: length})
 			if err != nil {
 				return nil, err
 			}
-			rrc = converted
-		}
-		if rrc != nil {
-			remoteReader, err := rrc.RangeRead(ctx, http_range.Range{Start: start, Length: length})
-			if err != nil {
-				return nil, err
-			}
-			rdr = utils.ReadCloser{Reader: remoteReader, Closer: rrc}
+			rdr = utils.ReadCloser{Reader: remoteReader, Closer: link.RangeReadCloser}
 		} else {
-			return nil, errs.NotSupport
+			rrf, err := stream.GetRangeReaderFuncFromLink(file.GetSize(), link)
+			if err != nil {
+				return nil, err
+			}
+			rdr, err = rrf(ctx, http_range.Range{Start: start, Length: length})
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -236,7 +232,11 @@ func (b *s3Backend) GetObject(ctx context.Context, bucketName, objectName string
 		Metadata: meta,
 		Size:     size,
 		Range:    rnge,
-		Contents: rdr,
+		Contents: &stream.RateLimitReader{
+			Reader:  rdr,
+			Limiter: stream.ServerDownloadLimit,
+			Ctx:     ctx,
+		},
 	}, nil
 }
 

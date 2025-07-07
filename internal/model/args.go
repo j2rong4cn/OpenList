@@ -27,7 +27,7 @@ type Link struct {
 	URL             string            `json:"url"`    // most common way
 	Header          http.Header       `json:"header"` // needed header (for url)
 	RangeReadCloser RangeReadCloserIF `json:"-"`      // recommended way if can't use URL
-	MFile           io.ReadSeeker     `json:"-"`      // best for local,smb... file system, which exposes MFile
+	MFile           File              `json:"-"`      // best for local,smb... file system, which exposes MFile
 
 	Expiration *time.Duration // local cache expire Duration
 
@@ -88,7 +88,9 @@ type RangeReadCloser struct {
 
 func (r *RangeReadCloser) RangeRead(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
 	rc, err := r.RangeReader(ctx, httpRange)
-	r.Closers.Add(rc)
+	if notAdd, ok := ctx.Value(utils.ClosersNoAddKey{}).(bool); !ok || !notAdd {
+		r.Closers.Add(rc)
+	}
 	return rc, err
 }
 

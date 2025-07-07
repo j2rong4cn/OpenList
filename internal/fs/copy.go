@@ -92,7 +92,7 @@ func _copy(ctx context.Context, srcObjPath, dstDirPath string, lazyCache ...bool
 			if err != nil {
 				return nil, errors.WithMessagef(err, "failed get [%s] link", srcObjPath)
 			}
-			fs := stream.FileStream{
+			fs := &stream.FileStream{
 				Obj: srcObj,
 				Ctx: ctx,
 			}
@@ -171,7 +171,7 @@ func copyFileBetween2Storages(tsk *CopyTask, srcStorage, dstStorage driver.Drive
 	if err != nil {
 		return errors.WithMessagef(err, "failed get [%s] link", srcFilePath)
 	}
-	fs := stream.FileStream{
+	fs := &stream.FileStream{
 		Obj: srcFile,
 		Ctx: tsk.Ctx(),
 	}

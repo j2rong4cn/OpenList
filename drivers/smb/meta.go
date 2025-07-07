@@ -14,11 +14,11 @@ type Addition struct {
 }
 
 var config = driver.Config{
-	Name:        "SMB",
-	LocalSort:   true,
-	OnlyLocal:   true,
-	DefaultRoot: ".",
-	NoCache:     true,
+	Name:          "SMB",
+	LocalSort:     true,
+	OnlyLinkMFile: true,
+	DefaultRoot:   ".",
+	NoCache:       true,
 }
 
 func init() {

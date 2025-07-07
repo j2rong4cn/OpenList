@@ -95,8 +95,8 @@ func (d *Mega) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*
 		size := file.GetSize()
 		resultRangeReader := func(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
 			length := httpRange.Length
-			if httpRange.Length >= 0 && httpRange.Start+httpRange.Length >= size {
-				length = -1
+			if httpRange.Length < 0 || httpRange.Start+httpRange.Length >= size {
+				length = size - httpRange.Start
 			}
 			var down *mega.Download
 			err := utils.Retry(3, time.Second, func() (err error) {

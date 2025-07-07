@@ -16,11 +16,11 @@ type Addition struct {
 }
 
 var config = driver.Config{
-	Name:        "SFTP",
-	LocalSort:   true,
-	OnlyLocal:   true,
-	DefaultRoot: "/",
-	CheckStatus: true,
+	Name:          "SFTP",
+	LocalSort:     true,
+	OnlyLinkMFile: true,
+	DefaultRoot:   "/",
+	CheckStatus:   true,
 }
 
 func init() {

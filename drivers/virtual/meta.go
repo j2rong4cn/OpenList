@@ -14,10 +14,10 @@ type Addition struct {
 }
 
 var config = driver.Config{
-	Name:      "Virtual",
-	OnlyLocal: true,
-	LocalSort: true,
-	NeedMs:    true,
+	Name:          "Virtual",
+	OnlyLinkMFile: true,
+	LocalSort:     true,
+	NeedMs:        true,
 	//NoCache:   true,
 }
 

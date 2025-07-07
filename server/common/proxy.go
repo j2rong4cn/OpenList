@@ -30,6 +30,7 @@ func Proxy(w http.ResponseWriter, r *http.Request, link *model.Link, file model.
 		return nil
 	} else if link.RangeReadCloser != nil {
 		attachHeader(w, file)
+		link.RangeReadCloser.AcquireReference()
 		return net.ServeHTTP(w, r, file.GetName(), file.ModTime(), file.GetSize(), &stream.RateLimitRangeReadCloser{
 			RangeReadCloserIF: link.RangeReadCloser,
 			Limiter:           stream.ServerDownloadLimit,
@@ -38,7 +39,7 @@ func Proxy(w http.ResponseWriter, r *http.Request, link *model.Link, file model.
 		attachHeader(w, file)
 		size := file.GetSize()
 		rangeReader := func(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
-			requestHeader := ctx.Value("request_header")
+			requestHeader := ctx.Value(net.RequestHeaderKey{})
 			if requestHeader == nil {
 				requestHeader = http.Header{}
 			}
@@ -107,11 +108,11 @@ func ProxyRange(ctx context.Context, link *model.Link, size int64) {
 		return
 	}
 	if link.RangeReadCloser == nil && !strings.HasPrefix(link.URL, GetApiUrl(ctx)+"/") {
-		var rrc, err = stream.GetRangeReadCloserFromLink(size, link)
+		var rrf, err = stream.GetRangeReaderFuncFromLink(size, link)
 		if err != nil {
 			return
 		}
-		link.RangeReadCloser = rrc
+		link.RangeReadCloser = &model.RangeReadCloser{RangeReader: rrf}
 	}
 }
 

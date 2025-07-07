@@ -45,7 +45,7 @@ func OpenDownload(ctx context.Context, reqPath string, offset int64) (*FileDownl
 	if err != nil {
 		return nil, err
 	}
-	fileStream := stream.FileStream{
+	fileStream := &stream.FileStream{
 		Obj: obj,
 		Ctx: ctx,
 	}
