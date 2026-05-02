@@ -26,21 +26,20 @@ func Down(c *gin.Context) {
 		return
 	}
 	if common.ShouldProxy(storage, filename) {
-		Proxy(c)
+		p(c, storage, rawPath)
 		return
-	} else {
-		link, _, err := fs.Link(c.Request.Context(), rawPath, model.LinkArgs{
-			IP:       c.ClientIP(),
-			Header:   c.Request.Header,
-			Type:     c.Query("type"),
-			Redirect: true,
-		})
-		if err != nil {
-			common.ErrorPage(c, err, 500)
-			return
-		}
-		redirect(c, link)
 	}
+	link, _, err := fs.Link(c.Request.Context(), rawPath, model.LinkArgs{
+		IP:       c.ClientIP(),
+		Header:   c.Request.Header,
+		Type:     c.Query("type"),
+		Redirect: true,
+	})
+	if err != nil {
+		common.ErrorPage(c, err, 500)
+		return
+	}
+	redirect(c, link)
 }
 
 func Proxy(c *gin.Context) {
@@ -52,25 +51,28 @@ func Proxy(c *gin.Context) {
 		return
 	}
 	if canProxy(storage, filename) {
-		if _, ok := c.GetQuery("d"); !ok {
-			if url := common.GenerateDownProxyURL(storage.GetStorage(), rawPath); url != "" {
-				c.Redirect(302, url)
-				return
-			}
-		}
-		link, file, err := fs.Link(c.Request.Context(), rawPath, model.LinkArgs{
-			Header: c.Request.Header,
-			Type:   c.Query("type"),
-		})
-		if err != nil {
-			common.ErrorPage(c, err, 500)
-			return
-		}
-		proxy(c, link, file, storage.GetStorage().ProxyRange)
-	} else {
-		common.ErrorPage(c, errors.New("proxy not allowed"), 403)
+		p(c, storage, rawPath)
 		return
 	}
+	common.ErrorPage(c, errors.New("proxy not allowed"), 403)
+}
+
+func p(c *gin.Context, storage driver.Driver, rawPath string) {
+	if _, ok := c.GetQuery("d"); !ok {
+		if url := common.GenerateDownProxyURL(storage.GetStorage(), rawPath); url != "" {
+			c.Redirect(302, url)
+			return
+		}
+	}
+	link, file, err := fs.Link(c.Request.Context(), rawPath, model.LinkArgs{
+		Header: c.Request.Header,
+		Type:   c.Query("type"),
+	})
+	if err != nil {
+		common.ErrorPage(c, err, 500)
+		return
+	}
+	proxy(c, link, file, storage.GetStorage().ProxyRange)
 }
 
 func redirect(c *gin.Context, link *model.Link) {
