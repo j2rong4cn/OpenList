@@ -1,12 +1,14 @@
 name: Beta Release builds
 
 on:
+  pull_request:
+    branches: ["me"]
   push:
-    branches: ["main"]
+    branches: ["me"]
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -29,93 +31,59 @@ jobs:
           ref: tags/beta
           sha: ${{ github.sha }}
 
-      - name: Delete beta tag
-        run: git tag -d beta
-        continue-on-error: true
-
-      - name: changelog # or changelogithub@0.12 if ensure the stable result
-        id: changelog
-        run: |
-          git tag -l
-          npx changelogithub --output CHANGELOG.md
-
-      - name: Upload assets to beta release
+      - name: Create beta release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if ! gh release view beta; then
-            gh release create beta --prerelease --notes-file CHANGELOG.md
-          else
-            gh release edit beta --prerelease --notes-file CHANGELOG.md
-          fi
-          gh release upload beta "CHANGELOG.md" --clobber
-
-      - name: Upload assets to github artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: beta changelog
-          path: ${{ github.workspace }}/CHANGELOG.md
-          compression-level: 0
-          if-no-files-found: error # 'warn' or 'ignore' are also available, defaults to `warn`
+        run: gh release view beta || gh release create beta --prerelease
 
   release:
+    runs-on: ubuntu-latest
     needs:
       - changelog
     strategy:
+      fail-fast: false
       matrix:
+        goos: [windows, linux]
+        goarch: [amd64]
+        goarm: [""]
+        ldflags: [""]
         include:
-          - target: "!(*musl*|*windows-arm64*|*windows7-*|*android*|*freebsd*)" # xgo and loongarch (exclude mips64le)
-            hash: "md5"
-            flags: ""
-            goflags: ""
-          - target: "linux-(mips|mips64|mipsle|mips64le|loong64)-musl*" # musl-compat-family
-            hash: "md5-linux-musl-mips"
-            flags: "-ldflags=-linkmode external -extldflags '-static -fpic'"
-            goflags: ""
-            musl_static: "true"
-          - target: "linux-!(arm*|mips|mips64|mipsle|mips64le|loong64)-musl*" # musl-not-arm (exclude compat-family)
-            hash: "md5-linux-musl"
-            flags: "-ldflags=-linkmode external -extldflags '-static -fpic'"
-            goflags: ""
-            musl_static: "true"
-          - target: "linux-arm*-musl*" #musl-arm
-            hash: "md5-linux-musl-arm"
-            flags: "-ldflags=-linkmode external -extldflags '-static -fpic'"
-            goflags: ""
-            musl_static: "true"
-          - target: "windows-arm64" #win-arm64
-            hash: "md5-windows-arm64"
-            flags: ""
-            goflags: ""
-            musl_static: "false"
-          - target: "windows7-*" #win7
-            hash: "md5-windows7"
-            flags: ""
-            goflags: "-tags=sqlite_cgo_compat"
-            musl_static: "false"
-          - target: "android-*" #android
-            hash: "md5-android"
-            flags: ""
-            goflags: ""
-            musl_static: "false"
-          - target: "freebsd-*" #freebsd
-            hash: "md5-freebsd"
-            flags: ""
-            goflags: ""
-            musl_static: "false"
-
-    name: Beta Release
-    runs-on: ubuntu-latest
+          - goos: android
+            goarch: arm64
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      GOARM: ${{ matrix.goarm }}
+      CGO_ENABLED: 0
+      APP_NAME: openlist
+      ASSET_NAME: "${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goarm }}"
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
+      - name: Setup NDK
+        if: matrix.goos == 'android'
+        run: |
+          wget -qO android-ndk.zip https://dl.google.com/android/repository/android-ndk-r29-linux.zip
+          unzip android-ndk.zip
+          rm android-ndk.zip
+          declare -A arches=(
+            ["amd64"]="x86_64-linux-android24-clang"
+            ["arm64"]="aarch64-linux-android24-clang"
+          )
+          echo CC="$(realpath android-ndk-*/toolchains/llvm/prebuilt/linux-x86_64/bin)/${arches[${{ matrix.goarch }}]}" >> $GITHUB_ENV
+          echo CGO_ENABLED=1 >> $GITHUB_ENV
+
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.26.4"
+          go-version: stable
+
+      - name: Show go env
+        run: |
+          go env
 
       - name: Setup web
         run: bash build.sh dev web
@@ -123,71 +91,54 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FRONTEND_REPO: ${{ vars.FRONTEND_REPO }}
 
-      - name: Build
-        uses: OpenListTeam/cgo-actions@v1.2.5
-        with:
-          targets: ${{ matrix.target }}
-          flags: ${{ matrix.flags || '-ldflags=' }}
-          static-link-for-musl: true
-          musl-target-format: $os-$musl-$arch
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          out-dir: build
-          output: openlist-$target$ext
-          musl-base-url: "https://github.com/OpenListTeam/musl-compilers/releases/latest/download/"
-          x-flags: |
-            github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$built_at
-            github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@openlist.team>
-            github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$git_commit
-            github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$tag
-            github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
-        env:
-          GOFLAGS: ${{ matrix.goflags }}
+      - name: Get project dependencies
+        run: go mod download
 
-      - name: Verify musl binaries are static
-        if: matrix.musl_static == 'true'
+      - name: Build
         run: |
-          set -e
-          shopt -s nullglob
-          files=(build/openlist-*-musl-*)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "No musl binaries found"
-            exit 1
+          mkdir -p build
+          appName="${{ env.APP_NAME }}"
+          builtAt="$(date +'%F %T %z')"
+          gitAuthor="The OpenList Projects Contributors <noreply@openlist.team>"
+          gitCommit=$(git log --pretty=format:"%h" -1)
+          git tag -d beta || true
+          # Always true if there's no tag
+          version=$(git describe --abbrev=0 --tags 2>/dev/null || echo "beta")
+          webVersion="rolling"
+          ldflags="-X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$builtAt' \
+          -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=$gitAuthor' \
+          -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$gitCommit' \
+          -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$version' \
+          -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=$webVersion' \
+          ${{ matrix.ldflags || '-w -s' }} \
+          -buildid="
+          if [[ "${{ matrix.goos }}" == 'windows' ]]; then
+            appName="$appName.exe"
           fi
-          for f in "${files[@]}"; do
-            if readelf -l "$f" | grep -q "Requesting program interpreter"; then
-              echo "Dynamic binary detected: $f"
-              readelf -l "$f" | grep "Requesting program interpreter" || true
-              exit 1
-            fi
-          done
+          go build -o build/$appName -trimpath -buildvcs=false -ldflags="$ldflags" -tags=jsoniter -v .
 
       - name: Compress
+        if: github.event_name != 'pull_request'
         run: |
-          bash build.sh zip ${{ matrix.hash }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          mkdir -p build_compress
+          cd build
+          if [[ "${{ matrix.goos }}" == 'windows' ]]; then
+            zip -j ../build_compress/${{ env.APP_NAME }}-${ASSET_NAME}.zip *
+          else
+            tar -czf ../build_compress/${{ env.APP_NAME }}-${ASSET_NAME}.tar.gz *
+          fi
 
       - name: Upload assets to beta release
+        if: github.event_name != 'pull_request'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          for file in build/compress/*; do
+          for file in build_compress/*; do
             gh release upload beta "$file" --clobber
           done
 
-      - name: Clean illegal characters from matrix.target
-        id: clean_target_name
-        run: |
-          ILLEGAL_CHARS_REGEX='[":<>|*?\\/\r\n]'
-          CLEANED_TARGET=$(echo "${{ matrix.target }}" | sed -E "s/$ILLEGAL_CHARS_REGEX//g")
-          echo "Original target: ${{ matrix.target }}"
-          echo "Cleaned target: $CLEANED_TARGET"
-          echo "cleaned_target=$CLEANED_TARGET" >> $GITHUB_ENV
-
-      - name: Upload assets to github artifact
+      - name: Upload files to Artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: beta builds for ${{ env.cleaned_target }}
-          path: ${{ github.workspace }}/build/compress/*
-          compression-level: 0
-          if-no-files-found: error # 'warn' or 'ignore' are also available, defaults to `warn`
+          name: ${{ env.APP_NAME }}-${{ env.ASSET_NAME }}
+          path: build/*
