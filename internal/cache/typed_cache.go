@@ -48,31 +48,32 @@ func (c *TypedCache[T]) GetType(key, typeKey string) (T, bool) {
 	cache, exists := c.entries[key]
 	if !exists {
 		c.mu.RUnlock()
-		return *new(T), false
+		var zero T
+		return zero, false
 	}
 	entry, exists := cache[typeKey]
-	if !exists {
-		c.mu.RUnlock()
-		return *new(T), false
-	}
-	expired := entry.Expired()
 	c.mu.RUnlock()
 
-	if !expired {
+	if !exists {
+		var zero T
+		return zero, false
+	}
+	if !entry.Expired() {
 		return entry.data, true
 	}
 
 	c.mu.Lock()
-	if cache[typeKey] == entry {
-		delete(cache, typeKey)
-		if len(cache) == 0 {
-			delete(c.entries, key)
+	if cache, exists = c.entries[key]; exists {
+		if cache[typeKey] == entry {
+			delete(cache, typeKey)
+			if len(cache) == 0 {
+				delete(c.entries, key)
+			}
 		}
-		c.mu.Unlock()
-		return *new(T), false
 	}
 	c.mu.Unlock()
-	return *new(T), false
+	var zero T
+	return zero, false
 }
 
 func (c *TypedCache[T]) DeleteKey(key string) {
@@ -89,25 +90,15 @@ func (c *TypedCache[T]) Clear() {
 
 func (c *TypedCache[T]) GC() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	expiredKeys := make(map[string][]string)
-	for tk, entries := range c.entries {
-		for key, entry := range entries {
-			if !entry.Expired() {
-				continue
+	for key, cache := range c.entries {
+		for typeKey, entry := range cache {
+			if entry.Expired() {
+				delete(cache, typeKey)
 			}
-			if _, ok := expiredKeys[tk]; !ok {
-				expiredKeys[tk] = make([]string, 0, len(entries))
-			}
-			expiredKeys[tk] = append(expiredKeys[tk], key)
+		}
+		if len(cache) == 0 {
+			delete(c.entries, key)
 		}
 	}
-	for tk, keys := range expiredKeys {
-		for _, key := range keys {
-			delete(c.entries[tk], key)
-		}
-		if len(c.entries[tk]) == 0 {
-			delete(c.entries, tk)
-		}
-	}
+	c.mu.Unlock()
 }

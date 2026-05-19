@@ -41,26 +41,23 @@ func (c *KeyedCache[T]) SetWithExpirable(key string, value T, exp Expirable) {
 func (c *KeyedCache[T]) Get(key string) (T, bool) {
 	c.mu.RLock()
 	entry, exists := c.entries[key]
-	if !exists {
-		c.mu.RUnlock()
-		return *new(T), false
-	}
-
-	expired := entry.Expired()
 	c.mu.RUnlock()
 
-	if !expired {
+	if !exists {
+		var zero T
+		return zero, false
+	}
+	if !entry.Expired() {
 		return entry.data, true
 	}
 
 	c.mu.Lock()
 	if c.entries[key] == entry {
 		delete(c.entries, key)
-		c.mu.Unlock()
-		return *new(T), false
 	}
 	c.mu.Unlock()
-	return *new(T), false
+	var zero T
+	return zero, false
 }
 
 func (c *KeyedCache[T]) Delete(key string) {
@@ -75,9 +72,12 @@ func (c *KeyedCache[T]) Pop(key string) (T, bool) {
 	defer c.mu.Unlock()
 	if entry, exists := c.entries[key]; exists {
 		delete(c.entries, key)
-		return entry.data, true
+		if !entry.Expired() {
+			return entry.data, true
+		}
 	}
-	return *new(T), false
+	var zero T
+	return zero, false
 }
 
 func (c *KeyedCache[T]) Clear() {
@@ -87,15 +87,11 @@ func (c *KeyedCache[T]) Clear() {
 }
 
 func (c *KeyedCache[T]) GC() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	expiredKeys := make([]string, 0, len(c.entries))
+	c.mu.RLock()
 	for key, entry := range c.entries {
 		if entry.Expired() {
-			expiredKeys = append(expiredKeys, key)
+			delete(c.entries, key)
 		}
 	}
-	for _, key := range expiredKeys {
-		delete(c.entries, key)
-	}
+	c.mu.RUnlock()
 }
